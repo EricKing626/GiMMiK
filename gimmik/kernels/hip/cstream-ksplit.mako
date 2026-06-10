@@ -6,7 +6,7 @@ cchunks = chunk(range(m), csz)
 loaded = set()
 %>
 
-__global__ __launch_bounds__(${blockx*ksplit}) void
+__global__ __launch_bounds__(${blockx*ksplit}, 1) void
 % if n is None:
 ${kname}(int n,
          const ${dtype}* __restrict__ b, int ldb,
@@ -29,18 +29,21 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     ${dtype} cv[${-(-csz // ksplit)}], bv[${-(-k // ksplit)}], dotp;
     __shared__ ${dtype} csub[${ksplit - 1}][${csz}][${blockx}];
 
+    if (i >= n)
+        return;
+
 ## Iterate over the row-partitions of C
 % for cchunk in cchunks:
-  ## Iterate over the row-partitions of B
+  ## Iterate over the column-partitions of B (compute partial dot products)
   % for bid, kbx in enumerate(kparts):
-    if (i < n && threadIdx.y == ${bid})
+    if (threadIdx.y == ${bid})
     {
     ## Evaluate our partial dot products
     % for j in cchunk:
       ## Load in any missing parts of B
       % for kx in kbx:
         % if A[j, kx] != 0 and kx not in loaded:
-        bv[${loop.index}] = b[i + ${kx}*ldb]; <% loaded.add(kx) %>
+        bv[${loop.index}] = __builtin_nontemporal_load(b + i + ${kx}*ldb); <% loaded.add(kx) %>
         % endif
       % endfor
       % if (dotex := dot(lambda kx: f'bv[{kx}]', A[j, kbx])) != '0.0':
@@ -59,17 +62,17 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     }
   % endfor
     __syncthreads();
-  ## Iterate over the column-partitions of B
+  ## Iterate over the column-partitions of B (sum and store)
   % for bid, kbx in enumerate(kparts):
-    if (i < n && threadIdx.y == ${bid})
+    if (threadIdx.y == ${bid})
     {
     ## Sum and output the final set of dot products
     % for j in cchunk:
       % if loop.index % ksplit == bid:
-        dotp = cv[${loop.index // ksplit}] + ${' + '.join(f'csub[{i}][{loop.index}][threadIdx.x]'
-                                                          for i in range(ksplit - 1))};
+        dotp = cv[${loop.index // ksplit}] + ${' + '.join(f'csub[{ii}][{loop.index}][threadIdx.x]'
+                                                          for ii in range(ksplit - 1))};
         % if beta == 0:
-        c[i + ${j}*ldc] = dotp;
+        __builtin_nontemporal_store(dotp, c + i + ${j}*ldc);
         % elif beta == 1:
         c[i + ${j}*ldc] += dotp;
         % else:
