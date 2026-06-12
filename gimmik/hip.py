@@ -204,15 +204,7 @@ class HIPMatMul(MatMul):
                     'desc': f'cstream-wide-ksplit/k{ks}-vw{vw}-x{blkx}'}
             yield ('cstream-wide-ksplit', args, meta)
 
-        # mfma-dense: Matrix-Core dense f64 kernel. gfx90a+ and f64 only.
-        gfx90a_plus = gcn_arch is not None and str(gcn_arch)[3:6] in (
-            '90a', '940', '941', '942')
-        if gfx90a_plus and dsize == 8 and self.m <= 256 and self.k <= 256:
-            blkx = 64
-            args = {'blockx': blkx}
-            meta = {'block': (blkx, 1, 1),
-                    'desc': f'mfma-dense/x{blkx}'}
-            yield ('mfma-dense', args, meta)
+        # mfma-dense: disabled (too many candidates selected in practice).
 
     def _process_meta(self, meta):
         if self.n is not None:
