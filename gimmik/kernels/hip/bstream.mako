@@ -35,11 +35,11 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     % endif
     ##
     % if kx == alix[j] and beta == 0:
-        c[i + ${j}*ldc] = csub[${j}];
+        nt_store_c(&c[i + ${j}*ldc], csub[${j}]);
     % elif kx == alix[j] and beta == 1:
-        c[i + ${j}*ldc] += csub[${j}];
+        nt_store_c(&c[i + ${j}*ldc], c[i + ${j}*ldc] + csub[${j}]);
     % elif kx == alix[j]:
-        c[i + ${j}*ldc] = csub[${j}] + ${beta}*c[i + ${j}*ldc];
+        nt_store_c(&c[i + ${j}*ldc], csub[${j}] + ${beta}*c[i + ${j}*ldc]);
     % endif
   % endfor
 % endfor
@@ -47,9 +47,9 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
 ## Handle rows of A which are all zero
 % for j, jx in enumerate(afix):
   % if jx == -1 and beta == 0:
-        c[i + ${j}*ldc] = make_zero();
+        nt_store_c(&c[i + ${j}*ldc], make_zero());
   % elif jx == -1 and beta != 1:
-        c[i + ${j}*ldc] *= ${beta};
+        nt_store_c(&c[i + ${j}*ldc], c[i + ${j}*ldc]*${beta});
   % endif
 % endfor
     }

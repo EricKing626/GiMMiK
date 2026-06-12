@@ -106,11 +106,11 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
         % endif
         ## If we're done with this dot product then store to global
         % if kx == alix[mcx[j]] and beta == 0:
-        c[i + ${mcx[j]}*ldc] = csub[${j}];
+        nt_store_c(&c[i + ${mcx[j]}*ldc], csub[${j}]);
         % elif kx == alix[mcx[j]] and beta == 1:
-        c[i + ${mcx[j]}*ldc] = gimmik_vadd(c[i + ${mcx[j]}*ldc], csub[${j}]);
+        nt_store_c(&c[i + ${mcx[j]}*ldc], gimmik_vadd(c[i + ${mcx[j]}*ldc], csub[${j}]));
         % elif kx == alix[mcx[j]]:
-        c[i + ${mcx[j]}*ldc] = gimmik_vadd(csub[${j}], gimmik_vmul(${beta}, c[i + ${mcx[j]}*ldc]));
+        nt_store_c(&c[i + ${mcx[j]}*ldc], gimmik_vadd(csub[${j}], gimmik_vmul(${beta}, c[i + ${mcx[j]}*ldc])));
         % endif
       % endfor
     % endfor
@@ -118,9 +118,9 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     % if loop.parent.last:
       % for j, jx in enumerate(afix):
         % if jx == -1 and j % msplit == cid and beta == 0:
-        c[i + ${j}*ldc] = make_zero();
+        nt_store_c(&c[i + ${j}*ldc], make_zero());
         % elif jx == -1 and j % msplit == cid and beta != 1:
-        c[i + ${j}*ldc] = gimmik_vmul(${beta}, c[i + ${j}*ldc]);
+        nt_store_c(&c[i + ${j}*ldc], gimmik_vmul(${beta}, c[i + ${j}*ldc]));
         % endif
       % endfor
     % endif

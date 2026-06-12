@@ -82,17 +82,17 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
         % if beta == 0:
         dotp = cv[${loop.index // ksplit}] + ${' + '.join(f'csub[{i}][{loop.index}][threadIdx.x]'
                                                           for i in range(ksplit - 1))};
-        c[i + ${j}*ldc] = dotp;
+        nt_store_c(&c[i + ${j}*ldc], dotp);
         % elif beta == 1 and has_dotp:
         dotp = cv[${loop.index // ksplit}] + ${' + '.join(f'csub[{i}][{loop.index}][threadIdx.x]'
                                                           for i in range(ksplit - 1))};
-        c[i + ${j}*ldc] = dotp;
+        nt_store_c(&c[i + ${j}*ldc], dotp);
         % elif beta != 1 and has_dotp:
         dotp = cv[${loop.index // ksplit}] + ${' + '.join(f'csub[{i}][{loop.index}][threadIdx.x]'
                                                           for i in range(ksplit - 1))};
-        c[i + ${j}*ldc] = dotp;
+        nt_store_c(&c[i + ${j}*ldc], dotp);
         % elif beta != 1:
-        c[i + ${j}*ldc] = ${beta}*c[i + ${j}*ldc];
+        nt_store_c(&c[i + ${j}*ldc], ${beta}*c[i + ${j}*ldc]);
         % endif
       % endif
     % endfor

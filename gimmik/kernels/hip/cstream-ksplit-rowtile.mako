@@ -92,11 +92,11 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
           dotp = cv[${loop.index // ksplit}] + ${' + '.join(f'csub[{i}][{loop.index}][threadIdx.x]'
                                                             for i in range(ksplit - 1))};
           % if beta == 0:
-          c[i + ${j}*ldc] = dotp;
+          nt_store_c(&c[i + ${j}*ldc], dotp);
           % elif beta == 1:
-          c[i + ${j}*ldc] += dotp;
+          nt_store_c(&c[i + ${j}*ldc], c[i + ${j}*ldc] + dotp);
           % else:
-          c[i + ${j}*ldc] = dotp + ${beta}*c[i + ${j}*ldc];
+          nt_store_c(&c[i + ${j}*ldc], dotp + ${beta}*c[i + ${j}*ldc]);
           % endif
         % endif
       % endfor

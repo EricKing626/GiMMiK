@@ -132,11 +132,11 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
 
         ## 寫回 Global Memory
         % if beta == 0:
-        c[i + ${j}*ldc] = dotp;
+        nt_store_c(&c[i + ${j}*ldc], dotp);
         % elif beta == 1:
-        c[i + ${j}*ldc] = gimmik_vadd(c[i + ${j}*ldc], dotp);
+        nt_store_c(&c[i + ${j}*ldc], gimmik_vadd(c[i + ${j}*ldc], dotp));
         % else:
-        c[i + ${j}*ldc] = gimmik_vadd(dotp, gimmik_vmul(${beta}, c[i + ${j}*ldc]));
+        nt_store_c(&c[i + ${j}*ldc], gimmik_vadd(dotp, gimmik_vmul(${beta}, c[i + ${j}*ldc])));
         % endif
       % endif
     % endfor

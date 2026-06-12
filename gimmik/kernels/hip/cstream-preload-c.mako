@@ -29,21 +29,21 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
   % if (dotex := dot(lambda kx: f'b[i + {kx}*ldb]', jx, maxsplit=ksplit)) != '0.0':
     % if beta == 0:
         dotp = ${dotex};
-        c[i + ${j}*ldc] = dotp;
+        nt_store_c(&c[i + ${j}*ldc], dotp);
     % elif beta == 1:
         dotp = c[i + ${j}*ldc];
         dotp += ${dotex};
-        c[i + ${j}*ldc] = dotp;
+        nt_store_c(&c[i + ${j}*ldc], dotp);
     % else:
         dotp = ${beta}*c[i + ${j}*ldc];
         dotp += ${dotex};
-        c[i + ${j}*ldc] = dotp;
+        nt_store_c(&c[i + ${j}*ldc], dotp);
     % endif
   % else:
     % if beta == 0:
-        c[i + ${j}*ldc] = make_zero();
+        nt_store_c(&c[i + ${j}*ldc], make_zero());
     % elif beta != 1:
-        c[i + ${j}*ldc] = ${beta}*c[i + ${j}*ldc];
+        nt_store_c(&c[i + ${j}*ldc], ${beta}*c[i + ${j}*ldc]);
     % endif
   % endif
 % endfor

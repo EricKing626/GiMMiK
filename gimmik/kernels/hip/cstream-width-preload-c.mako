@@ -78,27 +78,27 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
         bv = b[i + ${kx}*ldb];
         dotp = gimmik_vmadd(dotp, ${row[kx]}, bv);
       % endfor
-        c[i + ${j}*ldc] = dotp;
+        nt_store_c(&c[i + ${j}*ldc], dotp);
     % elif beta == 1:
         dotp = c[i + ${j}*ldc];
       % for kx in nzixs:
         bv = b[i + ${kx}*ldb];
         dotp = gimmik_vmadd(dotp, ${row[kx]}, bv);
       % endfor
-        c[i + ${j}*ldc] = dotp;
+        nt_store_c(&c[i + ${j}*ldc], dotp);
     % else:
         dotp = gimmik_vmul(${beta}, c[i + ${j}*ldc]);
       % for kx in nzixs:
         bv = b[i + ${kx}*ldb];
         dotp = gimmik_vmadd(dotp, ${row[kx]}, bv);
       % endfor
-        c[i + ${j}*ldc] = dotp;
+        nt_store_c(&c[i + ${j}*ldc], dotp);
     % endif
   % else:
     % if beta == 0:
-        c[i + ${j}*ldc] = make_zero();
+        nt_store_c(&c[i + ${j}*ldc], make_zero());
     % elif beta != 1:
-        c[i + ${j}*ldc] = gimmik_vmul(${beta}, c[i + ${j}*ldc]);
+        nt_store_c(&c[i + ${j}*ldc], gimmik_vmul(${beta}, c[i + ${j}*ldc]));
     % endif
   % endif
 % endfor
