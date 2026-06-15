@@ -6,6 +6,24 @@ class HIPMatMul(MatMul):
     platform = 'hip'
     basemeta = {'block': (128, 1, 1), 'width': 1, 'shared': 0}
 
+    def _colset_groups(self):
+        groups = {}
+
+        for j, row in enumerate(self.A):
+            cols = tuple(i for i, v in enumerate(row) if v != 0)
+            groups.setdefault(cols, []).append(j)
+
+        return [(cols, rows) for cols, rows in groups.items()]
+
+    def _has_grouped_bstream_pattern(self):
+        groups = self._colset_groups()
+
+        return (
+            groups and
+            all(len(cols) == 2 for cols, rows in groups) and
+            all(len(rows) > 1 for cols, rows in groups)
+        )
+
     def _kernel_generators(self, dtype, dsize, *, gcn_arch=None, warp_size=64):
         max_block_threads = 1024
         max_shared = 64 * 1024
@@ -64,6 +82,12 @@ class HIPMatMul(MatMul):
                             {'block': (x, 1, 1), 'desc': f'cstream/x{x}'})
             yield from emit('bstream', {'blockx': x}, 
                             {'block': (x, 1, 1), 'desc': f'bstream/x{x}'})
+            if self._has_grouped_bstream_pattern():
+                yield from emit('grouped-bstream',
+                                {'blockx': x,
+                                 'colset_groups': self._colset_groups()},
+                                {'block': (x, 1, 1),
+                                 'desc': f'grouped-bstream/x{x}'})
             yield from emit('cstream-preload-c', {'blockx': x},
                             {'block': (x, 1, 1), 'desc': f'cstream-preload-c/x{x}'})
             yield from emit('bstream-preload-c', {'blockx': x},
