@@ -32,9 +32,11 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     % if beta == 0:
             nt_store_c(&c[i + ${row}*ldc], csub${ri});
     % elif beta == 1:
-            nt_store_c(&c[i + ${row}*ldc], c[i + ${row}*ldc] + csub${ri});
+            ${dtype} cval${ri} = c[i + ${row}*ldc];
+            nt_store_c(&c[i + ${row}*ldc], cval${ri} + csub${ri});
     % else:
-            nt_store_c(&c[i + ${row}*ldc], csub${ri} + ${beta}*c[i + ${row}*ldc]);
+            ${dtype} cval${ri} = c[i + ${row}*ldc];
+            nt_store_c(&c[i + ${row}*ldc], csub${ri} + ${beta}*cval${ri});
     % endif
   % endfor
         }

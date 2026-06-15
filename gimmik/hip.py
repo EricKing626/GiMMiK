@@ -55,11 +55,6 @@ class HIPMatMul(MatMul):
         # Original default/base: [24] (adjusted to [16, 24] for sweep)
         P_BSZ = [8, 16, 24]       
 
-        # P_RT: Row-tile factor. 
-        # Decouples the M dimension into spatial tiles across different blocks.
-        # Original default/base: [2]
-        P_RT = [2]
-        
         # P_W: Vectorization width (Instruction level parallelism).
         # Locked to [2] to focus on memory bound optimization.
         P_W = []
@@ -74,89 +69,110 @@ class HIPMatMul(MatMul):
             if threads <= max_block_threads and shared <= max_shared:
                 yield (name, args, meta)
 
-        # --- 3. Sweep Combinations ---
-
-        # Base Stream Series (cstream / bstream)
+        # --- 3. Core Templates ---
         for x in P_BLKX:
-            yield from emit('cstream', {'blockx': x}, 
+            yield from emit('core/cstream', {'blockx': x}, 
                             {'block': (x, 1, 1), 'desc': f'cstream/x{x}'})
-            yield from emit('bstream', {'blockx': x}, 
+            yield from emit('core/bstream', {'blockx': x}, 
                             {'block': (x, 1, 1), 'desc': f'bstream/x{x}'})
-            if self._has_grouped_bstream_pattern():
-                yield from emit('grouped-bstream',
-                                {'blockx': x,
-                                 'colset_groups': self._colset_groups()},
-                                {'block': (x, 1, 1),
-                                 'desc': f'grouped-bstream/x{x}'})
-            yield from emit('cstream-preload-c', {'blockx': x},
-                            {'block': (x, 1, 1), 'desc': f'cstream-preload-c/x{x}'})
-            yield from emit('bstream-preload-c', {'blockx': x},
-                            {'block': (x, 1, 1), 'desc': f'bstream-preload-c/x{x}'})
-            
-            for w in P_W:
-                w_args = {'dtype': f'{dtype}{w}', 'width': w, 'blockx': x}
-                yield from emit('cstream-width', w_args, 
-                                {'block': (x, 1, 1), 'width': w, 'desc': f'cstream-width/w{w}-x{x}'})
-                yield from emit('cstream-width-preload-c', w_args,
-                                {'block': (x, 1, 1), 'width': w, 'desc': f'cstream-width-preload-c/w{w}-x{x}'})
-                yield from emit('bstream-width', w_args, 
-                                {'block': (x, 1, 1), 'width': w, 'desc': f'bstream-width/w{w}-x{x}'})
-                yield from emit('bstream-width-preload-c', w_args, 
-                                {'block': (x, 1, 1), 'width': w, 'desc': f'bstream-width-preload-c/w{w}-x{x}'})
 
-        # M-Split Series (bstream)
         for ms in P_MS:
             for bsz in P_BSZ:
                 for x in P_BLKX:
                     shared = 2 * bsz * x * dsize
                     base_args = {'msplit': ms, 'bsz': bsz, 'blockx': x}
-                    yield from emit('bstream-msplit', base_args, 
+                    yield from emit('core/bstream-msplit', base_args, 
                                     {'block': (x, ms, 1), 'shared': shared, 'desc': f'bstream-msplit/m{ms}-b{bsz}-x{x}'})
-                    yield from emit('bstream-msplit-preload-c', base_args, 
-                                    {'block': (x, ms, 1), 'shared': shared,'desc': f'bstream-msplit-preload-c/m{ms}-b{bsz}-x{x}'})
-                    
-                    for w in P_W:
-                        w_args = {**base_args, 'dtype': f'{dtype}{w}', 'width': w}
-                        yield from emit('bstream-msplit-width', w_args, 
-                                        {'block': (x, ms, 1), 'width': w, 'shared': shared * w, 'desc': f'bstream-msplit-width/w{w}-m{ms}-b{bsz}-x{x}'})
-                        yield from emit('bstream-msplit-width-preload-c', w_args, 
-                                        {'block': (x, ms, 1), 'width': w, 'shared': shared * w, 'desc': f'bstream-msplit-width-preload-c/w{w}-m{ms}-b{bsz}-x{x}'})
 
-        # K-Split Series (cstream)
         for ks in P_KS:
             for csz in P_CSZ:
                 for x in P_BLKX:
                     shared = (ks - 1) * csz * x * dsize
                     base_args = {'ksplit': ks, 'csz': csz, 'blockx': x}
-                    yield from emit('cstream-ksplit', base_args, 
+                    yield from emit('core/cstream-ksplit', base_args, 
                                     {'block': (x, ks, 1), 'shared': shared, 'desc': f'cstream-ksplit/k{ks}-c{csz}-x{x}'})
-                    yield from emit('cstream-ksplit-preload-c', base_args,
-                                    {'block': (x, ks, 1), 'shared': shared,'desc': f'cstream-ksplit-preload-c/k{ks}-c{csz}-x{x}'})
+
+        # --- 4. Opt Templates ---
+        for x in P_BLKX:
+            yield from emit('opt/cstream-preload-c', {'blockx': x},
+                            {'block': (x, 1, 1), 'desc': f'cstream-preload-c/x{x}'})
+            yield from emit('opt/bstream-preload-c', {'blockx': x},
+                            {'block': (x, 1, 1), 'desc': f'bstream-preload-c/x{x}'})
+
+            for w in P_W:
+                w_args = {'dtype': f'{dtype}{w}', 'width': w, 'blockx': x}
+                yield from emit('opt/cstream-width-preload-c', w_args,
+                                {'block': (x, 1, 1), 'width': w, 'desc': f'cstream-width-preload-c/w{w}-x{x}'})
+                yield from emit('opt/bstream-width-preload-c', w_args,
+                                {'block': (x, 1, 1), 'width': w, 'desc': f'bstream-width-preload-c/w{w}-x{x}'})
+
+        # bstream-msplit
+        for ms in P_MS:
+            for bsz in P_BSZ:
+                for x in P_BLKX:
+                    shared = 2 * bsz * x * dsize
+                    base_args = {'msplit': ms, 'bsz': bsz, 'blockx': x}
+                    yield from emit('opt/bstream-msplit-preload-c', base_args,
+                                    {'block': (x, ms, 1), 'shared': shared, 'desc': f'bstream-msplit-preload-c/m{ms}-b{bsz}-x{x}'})
 
                     for w in P_W:
                         w_args = {**base_args, 'dtype': f'{dtype}{w}', 'width': w}
-                        yield from emit('cstream-ksplit-width', w_args, 
-                                        {'block': (x, ks, 1), 'width': w, 'shared': shared * w, 'desc': f'cstream-ksplit-width/w{w}-k{ks}-c{csz}-x{x}'})
-                        yield from emit('cstream-ksplit-width-preload-c', w_args,
+                        yield from emit('opt/bstream-msplit-width-preload-c', w_args,
+                                        {'block': (x, ms, 1), 'width': w, 'shared': shared * w, 'desc': f'bstream-msplit-width-preload-c/w{w}-m{ms}-b{bsz}-x{x}'})
+        # cstream-ksplit
+        for ks in P_KS:
+            for csz in P_CSZ:
+                for x in P_BLKX:
+                    shared = (ks - 1) * csz * x * dsize
+                    base_args = {'ksplit': ks, 'csz': csz, 'blockx': x}
+                    yield from emit('opt/cstream-ksplit-preload-c', base_args,
+                                    {'block': (x, ks, 1), 'shared': shared, 'desc': f'cstream-ksplit-preload-c/k{ks}-c{csz}-x{x}'})
+
+                    for w in P_W:
+                        w_args = {**base_args, 'dtype': f'{dtype}{w}', 'width': w}
+                        yield from emit('opt/cstream-ksplit-width-preload-c', w_args,
                                         {'block': (x, ks, 1), 'width': w, 'shared': shared * w,
                                         'desc': f'cstream-ksplit-width-preload-c/w{w}-k{ks}-c{csz}-x{x}'})
 
-        # Row-Tile Series (cstream)
-        for ks in P_KS:
-            for rt in P_RT:
-                tile_size = (self.m + rt - 1) // rt
-                for csz in P_CSZ:
-                    if csz > tile_size:
-                        continue
-                    for x in P_BLKX:
-                        shared = (ks - 1) * csz * x * dsize
-                        base_args = {'ksplit': ks, 'rowtiles': rt, 'csz': csz, 'blockx': x}
-                        yield from emit('cstream-ksplit-rowtile', base_args, 
-                                        {'block': (x, ks, 1), 'grid_y': rt, 'shared': shared, 'desc': f'cstream-ksplit-rowtile/k{ks}-rt{rt}-c{csz}-x{x}'})
-                        for w in P_W:
-                            w_args = {**base_args, 'dtype': f'{dtype}{w}', 'width': w}
-                            yield from emit('cstream-ksplit-rowtile-width', w_args, 
-                                            {'block': (x, ks, 1), 'grid_y': rt, 'width': w, 'shared': shared * w, 'desc': f'cstream-ksplit-rowtile-width/w{w}-k{ks}-rt{rt}-c{csz}-x{x}'})
+        # --- 5. Special Templates ---
+        if self._has_grouped_bstream_pattern():
+            colset_groups = self._colset_groups()
+
+            for x in P_BLKX:
+                g_args = {'blockx': x, 'colset_groups': colset_groups}
+                yield from emit('special/grouped-bstream-preload-c',
+                                g_args,
+                                {'block': (x, 1, 1),
+                                 'desc': f'grouped-bstream-preload-c/x{x}'})
+
+                for w in P_W:
+                    gw_args = {
+                        **g_args, 'dtype': f'{dtype}{w}', 'width': w
+                    }
+                    yield from emit('special/grouped-bstream-width-preload-c',
+                                    gw_args,
+                                    {'block': (x, 1, 1), 'width': w,
+                                     'desc': f'grouped-bstream-width-preload-c/w{w}-x{x}'})
+
+            for ms in P_MS:
+                for x in P_BLKX:
+                    g_args = {
+                        'msplit': ms, 'blockx': x,
+                        'colset_groups': colset_groups
+                    }
+                    yield from emit('special/grouped-bstream-msplit-preload-c',
+                                    g_args,
+                                    {'block': (x, ms, 1),
+                                     'desc': f'grouped-bstream-msplit-preload-c/m{ms}-x{x}'})
+
+                    for w in P_W:
+                        gw_args = {
+                            **g_args, 'dtype': f'{dtype}{w}', 'width': w
+                        }
+                        yield from emit('special/grouped-bstream-msplit-width-preload-c',
+                                        gw_args,
+                                        {'block': (x, ms, 1), 'width': w,
+                                         'desc': f'grouped-bstream-msplit-width-preload-c/w{w}-m{ms}-x{x}'})
 
     def _process_meta(self, meta):
         if self.n is not None:
