@@ -24,6 +24,21 @@ class HIPMatMul(MatMul):
             all(len(rows) > 1 for cols, rows in groups)
         )
 
+    def _cucoop_ok(self, dsize):
+        # cu-coop stages A's non-zeros in LDS and keeps csub[m] in registers.
+        # Only worthwhile when A is dense enough that baking it as immediates
+        # would bloat the code; and only feasible when the LDS / register
+        # footprint fits. nnz*dsize must fit a slice of LDS and m must be small
+        # enough that csub[m] does not blow up VGPRs.
+        import numpy as np
+        nnz = int(np.count_nonzero(self.A))
+        density = nnz / (self.A.shape[0] * self.A.shape[1])
+        return (
+            density >= 0.4
+            and nnz * dsize <= 16 * 1024
+            and self.m <= 256
+        )
+
     def _kernel_generators(self, dtype, dsize, *, gcn_arch=None, warp_size=64):
         max_block_threads = 1024
         max_shared = 64 * 1024
@@ -61,10 +76,18 @@ class HIPMatMul(MatMul):
         if self.aligne is not None and self.aligne % 2 == 0:
             P_W = [2]
 
+        # P_LDS: enable the global_load_lds B-fill variant of bstream-msplit.
+        # Stages B straight from HBM into LDS (global -> LDS), bypassing the
+        # VGPR round-trip of the default fill. CDNA only (gfx940+); scalar path
+        # only (the builtin is dword-granular, so not combined with width>1).
+        is_cdna = gcn_arch is not None and str(gcn_arch).startswith('gfx94')
+        P_LDS = [True] if is_cdna else []
+
         # --- 2. Dispatch Helper ---
         def emit(name, args, meta):
             # Unified hardware resource validation to prevent compilation failure
-            threads = meta['block'][0] * meta.get('block', (1, 1, 1))[1]
+            blk = meta['block']
+            threads = blk[0] * blk[1]
             shared = meta.get('shared', 0)
             if threads <= max_block_threads and shared <= max_shared:
                 yield (name, args, meta)
@@ -83,6 +106,11 @@ class HIPMatMul(MatMul):
                     base_args = {'msplit': ms, 'bsz': bsz, 'blockx': x}
                     yield from emit('core/bstream-msplit', base_args, 
                                     {'block': (x, ms, 1), 'shared': shared, 'desc': f'bstream-msplit/m{ms}-b{bsz}-x{x}'})
+                    # Bandwidth variant: B filled via global_load_lds (global->LDS,
+                    # bypassing VGPRs). Same shared footprint; CDNA gfx940+ only.
+                    for _ in P_LDS:
+                        yield from emit('core/bstream-msplit-lds', base_args,
+                                        {'block': (x, ms, 1), 'shared': shared, 'desc': f'bstream-msplit-lds/m{ms}-b{bsz}-x{x}'})
 
         for ks in P_KS:
             for csz in P_CSZ:
@@ -173,6 +201,17 @@ class HIPMatMul(MatMul):
                                         gw_args,
                                         {'block': (x, ms, 1), 'width': w,
                                          'desc': f'grouped-bstream-msplit-width-preload-c/w{w}-m{ms}-x{x}'})
+
+        # cu-coop: dense-A variant. Stage A's non-zeros in LDS (shared by the
+        # whole work-group), stream B via Infinity Cache, write C non-temporally.
+        # CDNA gfx940+ and dense A only (see _cucoop_ok).
+        if is_cdna and self._cucoop_ok(dsize):
+            import numpy as np
+            nnz = int(np.count_nonzero(self.A))
+            for x in P_BLKX:
+                yield from emit('special/bstream-cu-coop', {'blockx': x},
+                                {'block': (x, 1, 1), 'shared': nnz * dsize,
+                                 'desc': f'bstream-cu-coop/x{x}'})
 
     def _process_meta(self, meta):
         if self.n is not None:
