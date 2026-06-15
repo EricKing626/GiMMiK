@@ -142,11 +142,19 @@ class HIPMatMul(MatMul):
                     base_args = {'msplit': ms, 'bsz': bsz, 'blockx': x}
                     yield from emit('opt/bstream-msplit-preload-c', base_args,
                                     {'block': (x, ms, 1), 'shared': shared, 'desc': f'bstream-msplit-preload-c/m{ms}-b{bsz}-x{x}'})
+                    # preload-c + LDS B-fill (load_to_lds, global->LDS). CDNA gfx94x only.
+                    for _ in P_LDS:
+                        yield from emit('opt/bstream-msplit-preload-c-lds', base_args,
+                                        {'block': (x, ms, 1), 'shared': shared, 'desc': f'bstream-msplit-preload-c-lds/m{ms}-b{bsz}-x{x}'})
 
                     for w in P_W:
                         w_args = {**base_args, 'dtype': f'{dtype}{w}', 'width': w}
                         yield from emit('opt/bstream-msplit-width-preload-c', w_args,
                                         {'block': (x, ms, 1), 'width': w, 'shared': shared * w, 'desc': f'bstream-msplit-width-preload-c/w{w}-m{ms}-b{bsz}-x{x}'})
+                        # width + preload-c + LDS B-fill. load_to_lds handles double2 (16B). CDNA only.
+                        for _ in P_LDS:
+                            yield from emit('opt/bstream-msplit-width-preload-c-lds', w_args,
+                                            {'block': (x, ms, 1), 'width': w, 'shared': shared * w, 'desc': f'bstream-msplit-width-preload-c-lds/w{w}-m{ms}-b{bsz}-x{x}'})
         # cstream-ksplit
         for ks in P_KS:
             for csz in P_CSZ:
