@@ -1,14 +1,13 @@
-<%inherit file='base'/>
 <%doc>
   bstream-msplit-width-preload-c-lds
-  =================================
-  = repo 的贏家 bstream-msplit-width-preload-c,B 雙緩衝填充改用
-  __builtin_amdgcn_load_to_lds(global -> LDS,繞過 VGPR)。width 向量化
-  與 preload-c 全數沿用 repo 版骨架(含 gimmik_vmul/vadd/vmadd)。
-  注意:load_to_lds 為非同步 DMA;本檔依賴既有的 __syncthreads() 作為完成屏障。
-  真實 hipcc/MI300X 上請確認 LDS 讀取前 DMA 已完成(必要時補 waitcnt/fence)。
-  load_to_lds 支援 4/8/12/16 byte:scalar double=8B、double2=16B 皆可。僅 CDNA(gfx94x)。
+  以對應基底為本,只把 B 的雙緩衝填充改成 __builtin_amdgcn_load_to_lds:
+  global -> LDS 直送,繞過 VGPR round-trip。其餘(preload-c 讀回、accumulate、
+  nt_store_c 寫出、全零列處理)與基底完全一致。
+  load_to_lds 支援 4/8/12/16B:double(8B)與 double2(16B)皆可直送
+  (需 ROCm 6.x+)。非同步,依賴既有 __syncthreads();16B 傳輸需 16B 對齊。
+  僅 CDNA(gfx90a/gfx94x)。
 </%doc>
+<%inherit file='base'/>
 
 % if width == 2:
 static inline __device__ ${dtype}

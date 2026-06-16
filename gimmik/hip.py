@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 
+import numpy as np
+
 from gimmik.base import MatMul
 
 class HIPMatMul(MatMul):
@@ -30,7 +32,6 @@ class HIPMatMul(MatMul):
         # would bloat the code; and only feasible when the LDS / register
         # footprint fits. nnz*dsize must fit a slice of LDS and m must be small
         # enough that csub[m] does not blow up VGPRs.
-        import numpy as np
         nnz = int(np.count_nonzero(self.A))
         density = nnz / (self.A.shape[0] * self.A.shape[1])
         return (
@@ -80,7 +81,19 @@ class HIPMatMul(MatMul):
         # Stages B straight from HBM into LDS (global -> LDS), bypassing the
         # VGPR round-trip of the default fill. CDNA only (gfx940+); scalar path
         # only (the builtin is dword-granular, so not combined with width>1).
-        is_cdna = gcn_arch is not None and str(gcn_arch).startswith('gfx94')
+        # Robust CDNA detection: real gcn_arch strings often carry feature
+        # suffixes (e.g. 'gfx942:sramecc+:xnack-'), so match the gfxNNN token
+        # only. load_to_lds / nontemporal exist on CDNA2 (gfx90a) and CDNA3
+        # (gfx94x). NOTE: the width+lds path uses __builtin_amdgcn_load_to_lds,
+        # which needs ROCm 6.x+ / a recent LLVM; if your toolchain is older,
+        # restrict P_LDS to the scalar path or bump the toolchain.
+        def _is_cdna(arch):
+            if arch is None:
+                return False
+            tok = str(arch).split(':', 1)[0]
+            return tok.startswith('gfx9') and tok[3:] in (
+                '90a', '940', '941', '942', '950')
+        is_cdna = _is_cdna(gcn_arch)
         P_LDS = [True] if is_cdna else []
 
         # --- 2. Dispatch Helper ---
@@ -214,7 +227,6 @@ class HIPMatMul(MatMul):
         # whole work-group), stream B via Infinity Cache, write C non-temporally.
         # CDNA gfx940+ and dense A only (see _cucoop_ok).
         if is_cdna and self._cucoop_ok(dsize):
-            import numpy as np
             nnz = int(np.count_nonzero(self.A))
             for x in P_BLKX:
                 yield from emit('special/bstream-cu-coop', {'blockx': x},
