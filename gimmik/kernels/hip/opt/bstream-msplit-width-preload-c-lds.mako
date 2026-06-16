@@ -1,13 +1,13 @@
+<%inherit file='base'/>
 <%doc>
   bstream-msplit-width-preload-c-lds
-  以對應基底為本,只把 B 的雙緩衝填充改成 __builtin_amdgcn_load_to_lds:
-  global -> LDS 直送,繞過 VGPR round-trip。其餘(preload-c 讀回、accumulate、
-  nt_store_c 寫出、全零列處理)與基底完全一致。
-  load_to_lds 支援 4/8/12/16B:double(8B)與 double2(16B)皆可直送
-  (需 ROCm 6.x+)。非同步,依賴既有 __syncthreads();16B 傳輸需 16B 對齊。
-  僅 CDNA(gfx90a/gfx94x)。
+  = repo 的對應 kernel,B 雙緩衝填充改成 global -> LDS 直送(繞過 VGPR)。
+  width(double2)+preload-c;含 gimmik_vmul/vadd/vmadd 與 #error 守衛。
+  gfx942 的 load_to_lds 每次僅 1/2/4 byte,故每個元素拆成 ${ndw} 次 size=4 傳輸
+  (double=2、double2=4)。用 C 迴圈以免 mako loop.index 被覆蓋。
+  注意:load_to_lds 為非同步 DMA,仍靠既有 __syncthreads() 作完成屏障,
+  上機請驗證 LDS 讀取前 DMA 已完成。僅 CDNA(gfx94x)。
 </%doc>
-<%inherit file='base'/>
 
 % if width == 2:
 static inline __device__ ${dtype}
@@ -146,3 +146,5 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     }
   % endfor
     __syncthreads();
+% endfor
+}
