@@ -83,7 +83,7 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     {
   % for kx in bchunks[0]:
     % if loop.index % msplit == cid:
-        __builtin_amdgcn_load_to_lds((const ${dtype}*)(b + i + ${kx}*ldb), (${dtype}*)&bsub[0][${loop.index}][threadIdx.x], sizeof(${dtype}), 0, 0);
+        __builtin_amdgcn_load_to_lds((void*)(b + i + ${kx}*ldb), (void*)&bsub[0][${loop.index}][threadIdx.x], sizeof(${dtype}), 0, 0);
     % endif
   % endfor
 
@@ -113,7 +113,7 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     % if not loop.parent.last:
       % for kx in bchunks[bb + 1]:
         % if loop.index % msplit == cid:
-        __builtin_amdgcn_load_to_lds((const ${dtype}*)(b + i + ${kx}*ldb), (${dtype}*)&bsub[${(bb + 1) % 2}][${loop.index}][threadIdx.x], sizeof(${dtype}), 0, 0);
+        __builtin_amdgcn_load_to_lds((void*)(b + i + ${kx}*ldb), (void*)&bsub[${(bb + 1) % 2}][${loop.index}][threadIdx.x], sizeof(${dtype}), 0, 0);
         % endif
       % endfor
     % endif
@@ -143,5 +143,3 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     }
   % endfor
     __syncthreads();
-% endfor
-}
