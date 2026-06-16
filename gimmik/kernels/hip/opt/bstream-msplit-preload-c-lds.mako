@@ -12,6 +12,7 @@
 <%
 mx = partition(A, into=msplit, by='rows')
 bchunks = chunk(bix, bsz)
+ndw = {'double': 2, 'double2': 4, 'double4': 8, 'float': 1, 'float2': 2, 'float4': 4}.get(dtype, max(1, len(dtype)))
 %>
 
 __global__ __launch_bounds__(${blockx*msplit}) void
@@ -43,7 +44,8 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     {
   % for kx in bchunks[0]:
     % if loop.index % msplit == cid:
-        __builtin_amdgcn_load_to_lds((void*)(b + i + ${kx}*ldb), (void*)&bsub[0][${loop.index}][threadIdx.x], sizeof(${dtype}), 0, 0);
+        for (int dw = 0; dw < ${ndw}; ++dw)
+            __builtin_amdgcn_load_to_lds((void*)((const char*)(b + i + ${kx}*ldb) + 4*dw), (void*)((char*)&bsub[0][${loop.index}][threadIdx.x] + 4*dw), 4, 0, 0);
     % endif
   % endfor
 
@@ -73,7 +75,8 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     % if not loop.parent.last:
       % for kx in bchunks[bb + 1]:
         % if loop.index % msplit == cid:
-        __builtin_amdgcn_load_to_lds((void*)(b + i + ${kx}*ldb), (void*)&bsub[${(bb + 1) % 2}][${loop.index}][threadIdx.x], sizeof(${dtype}), 0, 0);
+        for (int dw = 0; dw < ${ndw}; ++dw)
+            __builtin_amdgcn_load_to_lds((void*)((const char*)(b + i + ${kx}*ldb) + 4*dw), (void*)((char*)&bsub[${(bb + 1) % 2}][${loop.index}][threadIdx.x] + 4*dw), 4, 0, 0);
         % endif
       % endfor
     % endif
