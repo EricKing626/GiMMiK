@@ -44,6 +44,31 @@ class HIPMatMul(MatMul):
         max_block_threads = 1024
         max_shared = 64 * 1024
 
+        # Optional single-strategy filter, set by the bench harness via the
+        # GIMMIK_ONLY env var (e.g. GIMMIK_ONLY=bstream-msplit-width-lds). When
+        # set, only kernels whose template name / desc match are emitted; PyFR
+        # then still benchmarks and tunes the parameter sweep *within* that one
+        # strategy. Matches the tplname ('opt/foo'), its basename ('foo'), the
+        # desc head ('foo' of 'foo/w2-m4-...'), the full desc, or any desc
+        # prefix. Unset -> all strategies (default behaviour).
+        import os
+        # Fallback: if the caller didn't pass gcn_arch (some PyFR gimmik
+        # providers call kernels(dtype) without it), read GIMMIK_GCN_ARCH so
+        # the CDNA-gated strategies (*-lds, cu-coop*) still get emitted,
+        # e.g. GIMMIK_GCN_ARCH=gfx942.
+        if gcn_arch is None:
+            gcn_arch = os.environ.get('GIMMIK_GCN_ARCH') or None
+        _strat_only = os.environ.get('GIMMIK_ONLY') or None
+        def _strat_match(name, desc):
+            if not _strat_only:
+                return True
+            base = name.split('/')[-1]              # 'opt/foo' -> 'foo'
+            head = desc.split('/')[0] if desc else ''   # 'foo/w2-..' -> 'foo'
+            # Exact match only (no loose prefix): so 'cstream-width' selects
+            # cstream-width and NOT cstream-width-preload-c. Pass a full desc
+            # like 'bstream-msplit-width-lds/w2-m4-b16-x128' to pin one config.
+            return _strat_only in (name, base, head, desc)
+
         # --- 1. Parameter Pool Definition ---
         
         # P_BLKX: Number of threads per block in the X dimension. 
@@ -98,6 +123,9 @@ class HIPMatMul(MatMul):
 
         # --- 2. Dispatch Helper ---
         def emit(name, args, meta):
+            # Optional single-strategy filter (GIMMIK_ONLY env var)
+            if not _strat_match(name, meta.get('desc', '')):
+                return
             # Unified hardware resource validation to prevent compilation failure
             blk = meta['block']
             threads = blk[0] * blk[1]
