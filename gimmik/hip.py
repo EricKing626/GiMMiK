@@ -146,6 +146,11 @@ class HIPMatMul(MatMul):
                                 {'block': (x, 1, 1), 'width': w, 'desc': f'cstream-width-preload-c/w{w}-x{x}'})
                 yield from emit('opt/bstream-width-preload-c', w_args,
                                 {'block': (x, 1, 1), 'width': w, 'desc': f'bstream-width-preload-c/w{w}-x{x}'})
+                # naked width (no preload-c): pure double2/4 vectorized streaming
+                yield from emit('opt/cstream-width', w_args,
+                                {'block': (x, 1, 1), 'width': w, 'desc': f'cstream-width/w{w}-x{x}'})
+                yield from emit('opt/bstream-width', w_args,
+                                {'block': (x, 1, 1), 'width': w, 'desc': f'bstream-width/w{w}-x{x}'})
 
         # bstream-msplit
         for ms in P_MS:
@@ -168,6 +173,13 @@ class HIPMatMul(MatMul):
                         for _ in P_LDS:
                             yield from emit('opt/bstream-msplit-width-preload-c-lds', w_args,
                                             {'block': (x, ms, 1), 'width': w, 'shared': shared * w, 'desc': f'bstream-msplit-width-preload-c-lds/w{w}-m{ms}-b{bsz}-x{x}'})
+                        # naked width (no preload-c)
+                        yield from emit('opt/bstream-msplit-width', w_args,
+                                        {'block': (x, ms, 1), 'width': w, 'shared': shared * w, 'desc': f'bstream-msplit-width/w{w}-m{ms}-b{bsz}-x{x}'})
+                        # naked width + LDS B-fill (load_to_lds, no preload-c). CDNA only.
+                        for _ in P_LDS:
+                            yield from emit('opt/bstream-msplit-width-lds', w_args,
+                                            {'block': (x, ms, 1), 'width': w, 'shared': shared * w, 'desc': f'bstream-msplit-width-lds/w{w}-m{ms}-b{bsz}-x{x}'})
         # cstream-ksplit
         for ks in P_KS:
             for csz in P_CSZ:
@@ -182,6 +194,10 @@ class HIPMatMul(MatMul):
                         yield from emit('opt/cstream-ksplit-width-preload-c', w_args,
                                         {'block': (x, ks, 1), 'width': w, 'shared': shared * w,
                                         'desc': f'cstream-ksplit-width-preload-c/w{w}-k{ks}-c{csz}-x{x}'})
+                        # naked width (no preload-c)
+                        yield from emit('opt/cstream-ksplit-width', w_args,
+                                        {'block': (x, ks, 1), 'width': w, 'shared': shared * w,
+                                        'desc': f'cstream-ksplit-width/w{w}-k{ks}-c{csz}-x{x}'})
 
         # --- 5. Special Templates ---
         if self._has_grouped_bstream_pattern():
@@ -232,9 +248,12 @@ class HIPMatMul(MatMul):
                 yield from emit('special/bstream-cu-coop', {'blockx': x},
                                 {'block': (x, 1, 1), 'shared': nnz * dsize,
                                  'desc': f'bstream-cu-coop/x{x}'})
+                # control / 對照: same kernel but A baked as immediates (no LDS staging)
+                yield from emit('special/bstream-cu-coop-baked', {'blockx': x},
+                                {'block': (x, 1, 1),
+                                 'desc': f'bstream-cu-coop-baked/x{x}'})
 
     def _process_meta(self, meta):
         if self.n is not None:
-            # Safely fetch width, defaulting to 1 if not vectorized
-            div = meta['block'][0] * meta.get('width', 1)
-            meta['grid'] = (-(-self.n // div), meta.get('grid_y', 1), 1)
+            div = meta['block'][0]*meta['width']
+            meta['grid'] = (-(-self.n // div), 1, 1)
