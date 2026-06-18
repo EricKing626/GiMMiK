@@ -94,7 +94,15 @@ class HIPMatMul(MatMul):
         # P_BSZ: B chunk size. 
         # Number of B matrix elements loaded into shared memory per iteration in bstream.
         # Original default/base: [24] (adjusted to [16, 24] for sweep)
-        P_BSZ = [8, 16, 24]       
+        P_BSZ = [8, 16, 24]
+
+        # P_MS_LDS / P_BSZ_LDS: dedicated, more aggressive pool for the LDS
+        # variants. Because load_to_lds fills B straight to LDS (bypassing
+        # VGPRs), the lds kernels have lower register pressure than the
+        # non-lds ones and can afford bigger msplit / bsz before occupancy
+        # collapses -- so they get their own sweep instead of P_MS / P_BSZ.
+        P_MS_LDS = [4, 8, 12, 16]
+        P_BSZ_LDS = [16, 24, 32, 48]
 
         # P_W: Vectorization width (Instruction level parallelism).
         # Locked to [2] to focus on memory bound optimization.
@@ -147,11 +155,6 @@ class HIPMatMul(MatMul):
                     base_args = {'msplit': ms, 'bsz': bsz, 'blockx': x}
                     yield from emit('core/bstream-msplit', base_args, 
                                     {'block': (x, ms, 1), 'shared': shared, 'desc': f'bstream-msplit/m{ms}-b{bsz}-x{x}'})
-                    # Bandwidth variant: B filled via global_load_lds (global->LDS,
-                    # bypassing VGPRs). Same shared footprint; CDNA gfx940+ only.
-                    for _ in P_LDS:
-                        yield from emit('core/bstream-msplit-lds', base_args,
-                                        {'block': (x, ms, 1), 'shared': shared, 'desc': f'bstream-msplit-lds/m{ms}-b{bsz}-x{x}'})
 
         for ks in P_KS:
             for csz in P_CSZ:
@@ -188,26 +191,14 @@ class HIPMatMul(MatMul):
                     base_args = {'msplit': ms, 'bsz': bsz, 'blockx': x}
                     yield from emit('opt/bstream-msplit-preload-c', base_args,
                                     {'block': (x, ms, 1), 'shared': shared, 'desc': f'bstream-msplit-preload-c/m{ms}-b{bsz}-x{x}'})
-                    # preload-c + LDS B-fill (load_to_lds, global->LDS). CDNA gfx94x only.
-                    for _ in P_LDS:
-                        yield from emit('opt/bstream-msplit-preload-c-lds', base_args,
-                                        {'block': (x, ms, 1), 'shared': shared, 'desc': f'bstream-msplit-preload-c-lds/m{ms}-b{bsz}-x{x}'})
 
                     for w in P_W:
                         w_args = {**base_args, 'dtype': f'{dtype}{w}', 'width': w}
                         yield from emit('opt/bstream-msplit-width-preload-c', w_args,
                                         {'block': (x, ms, 1), 'width': w, 'shared': shared * w, 'desc': f'bstream-msplit-width-preload-c/w{w}-m{ms}-b{bsz}-x{x}'})
-                        # width + preload-c + LDS B-fill. load_to_lds handles double2 (16B). CDNA only.
-                        for _ in P_LDS:
-                            yield from emit('opt/bstream-msplit-width-preload-c-lds', w_args,
-                                            {'block': (x, ms, 1), 'width': w, 'shared': shared * w, 'desc': f'bstream-msplit-width-preload-c-lds/w{w}-m{ms}-b{bsz}-x{x}'})
                         # naked width (no preload-c)
                         yield from emit('opt/bstream-msplit-width', w_args,
                                         {'block': (x, ms, 1), 'width': w, 'shared': shared * w, 'desc': f'bstream-msplit-width/w{w}-m{ms}-b{bsz}-x{x}'})
-                        # naked width + LDS B-fill (load_to_lds, no preload-c). CDNA only.
-                        for _ in P_LDS:
-                            yield from emit('opt/bstream-msplit-width-lds', w_args,
-                                            {'block': (x, ms, 1), 'width': w, 'shared': shared * w, 'desc': f'bstream-msplit-width-lds/w{w}-m{ms}-b{bsz}-x{x}'})
         # cstream-ksplit
         for ks in P_KS:
             for csz in P_CSZ:
@@ -226,6 +217,40 @@ class HIPMatMul(MatMul):
                         yield from emit('opt/cstream-ksplit-width', w_args,
                                         {'block': (x, ks, 1), 'width': w, 'shared': shared * w,
                                         'desc': f'cstream-ksplit-width/w{w}-k{ks}-c{csz}-x{x}'})
+
+        # --- 4b. LDS variants: dedicated (larger) parameter pool ------------
+        # load_to_lds moves B's fill out of VGPRs, so these tolerate bigger
+        # msplit/bsz than the VGPR-bound non-lds kernels -> own sweep (P_*_LDS).
+        # Two buffering modes each:
+        #   double-buffer       : prefetch next chunk, 2x LDS, DMA/compute overlap
+        #   single-buffer (-sb) : no prefetch, 1x LDS -> more occupancy if LDS-bound
+        for _ in P_LDS:
+            for ms in P_MS_LDS:
+                for bsz in P_BSZ_LDS:
+                    for x in P_BLKX:
+                        base_args = {'msplit': ms, 'bsz': bsz, 'blockx': x}
+                        db = 2 * bsz * x * dsize
+                        sb = bsz * x * dsize
+                        # scalar core
+                        yield from emit('core/bstream-msplit-lds', base_args,
+                                        {'block': (x, ms, 1), 'shared': db, 'desc': f'bstream-msplit-lds/m{ms}-b{bsz}-x{x}'})
+                        yield from emit('core/bstream-msplit-lds-sb', base_args,
+                                        {'block': (x, ms, 1), 'shared': sb, 'desc': f'bstream-msplit-lds-sb/m{ms}-b{bsz}-x{x}'})
+                        # scalar preload-c
+                        yield from emit('opt/bstream-msplit-preload-c-lds', base_args,
+                                        {'block': (x, ms, 1), 'shared': db, 'desc': f'bstream-msplit-preload-c-lds/m{ms}-b{bsz}-x{x}'})
+                        yield from emit('opt/bstream-msplit-preload-c-lds-sb', base_args,
+                                        {'block': (x, ms, 1), 'shared': sb, 'desc': f'bstream-msplit-preload-c-lds-sb/m{ms}-b{bsz}-x{x}'})
+                        # width preload-c (+ single-buffer)
+                        for w in P_W:
+                            w_args = {**base_args, 'dtype': f'{dtype}{w}', 'width': w}
+                            yield from emit('opt/bstream-msplit-width-preload-c-lds', w_args,
+                                            {'block': (x, ms, 1), 'width': w, 'shared': db * w, 'desc': f'bstream-msplit-width-preload-c-lds/w{w}-m{ms}-b{bsz}-x{x}'})
+                            yield from emit('opt/bstream-msplit-width-preload-c-lds-sb', w_args,
+                                            {'block': (x, ms, 1), 'width': w, 'shared': sb * w, 'desc': f'bstream-msplit-width-preload-c-lds-sb/w{w}-m{ms}-b{bsz}-x{x}'})
+                            # naked width + lds (no preload-c, double-buffer only)
+                            yield from emit('opt/bstream-msplit-width-lds', w_args,
+                                            {'block': (x, ms, 1), 'width': w, 'shared': db * w, 'desc': f'bstream-msplit-width-lds/w{w}-m{ms}-b{bsz}-x{x}'})
 
         # --- 5. Special Templates ---
         if self._has_grouped_bstream_pattern():
