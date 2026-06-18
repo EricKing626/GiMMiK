@@ -70,28 +70,36 @@ class HIPMatMul(MatMul):
             return _strat_only in (name, base, head, desc)
 
         # --- 1. Parameter Pool Definition ---
-        
-        # P_BLKX: Number of threads per block in the X dimension. 
+
+        # P_BLKX: Number of threads per block in the X dimension.
         # Dictates the base occupancy and shared memory tile width.
         # Original default/base: [128]
         P_BLKX = [64, 128]
 
-        # P_KS: K-split factor. 
+        # P_BLKX_MS: block.x sweep for the bstream-msplit family only. Adds 32
+        # and 256 to [64,128]. 32 is wavefront-safe here (msplit family always
+        # has msplit>=4, so blockx*msplit stays a multiple of 64), but blockx<64
+        # narrows global-load coalescing to blockx wide -- left in as an
+        # autotuner experiment. Non-msplit kernels keep P_BLKX (blockx=32 there
+        # would waste half a wavefront).
+        P_BLKX_MS = [32, 64, 128, 256]
+
+        # P_KS: K-split factor.
         # Divides the inner product dimension (K) across threads to reduce register pressure.
         # Original default/base: [2]
         P_KS = [2, 4]
 
-        # P_MS: M-split factor. 
+        # P_MS: M-split factor.
         # Divides the matrix C rows (M) across threads in bstream to reduce register pressure.
         # Original default/base: [4]
-        P_MS = [4, 8]             
+        P_MS = [4, 8]
 
-        # P_CSZ: C chunk size. 
+        # P_CSZ: C chunk size.
         # Number of C matrix row elements processed per thread in temporal loops.
         # Original default/base: [24] (adjusted to [12, 24] for sweep)
-        P_CSZ = [8, 12, 24]       
+        P_CSZ = [8, 12, 24]
 
-        # P_BSZ: B chunk size. 
+        # P_BSZ: B chunk size.
         # Number of B matrix elements loaded into shared memory per iteration in bstream.
         # Original default/base: [24] (adjusted to [16, 24] for sweep)
         P_BSZ = [8, 16, 24]
@@ -143,17 +151,17 @@ class HIPMatMul(MatMul):
 
         # --- 3. Core Templates ---
         for x in P_BLKX:
-            yield from emit('core/cstream', {'blockx': x}, 
+            yield from emit('core/cstream', {'blockx': x},
                             {'block': (x, 1, 1), 'desc': f'cstream/x{x}'})
-            yield from emit('core/bstream', {'blockx': x}, 
+            yield from emit('core/bstream', {'blockx': x},
                             {'block': (x, 1, 1), 'desc': f'bstream/x{x}'})
 
         for ms in P_MS:
             for bsz in P_BSZ:
-                for x in P_BLKX:
+                for x in P_BLKX_MS:
                     shared = 2 * bsz * x * dsize
                     base_args = {'msplit': ms, 'bsz': bsz, 'blockx': x}
-                    yield from emit('core/bstream-msplit', base_args, 
+                    yield from emit('core/bstream-msplit', base_args,
                                     {'block': (x, ms, 1), 'shared': shared, 'desc': f'bstream-msplit/m{ms}-b{bsz}-x{x}'})
 
         for ks in P_KS:
@@ -161,7 +169,7 @@ class HIPMatMul(MatMul):
                 for x in P_BLKX:
                     shared = (ks - 1) * csz * x * dsize
                     base_args = {'ksplit': ks, 'csz': csz, 'blockx': x}
-                    yield from emit('core/cstream-ksplit', base_args, 
+                    yield from emit('core/cstream-ksplit', base_args,
                                     {'block': (x, ks, 1), 'shared': shared, 'desc': f'cstream-ksplit/k{ks}-c{csz}-x{x}'})
 
         # --- 4. Opt Templates ---
@@ -186,7 +194,7 @@ class HIPMatMul(MatMul):
         # bstream-msplit
         for ms in P_MS:
             for bsz in P_BSZ:
-                for x in P_BLKX:
+                for x in P_BLKX_MS:
                     shared = 2 * bsz * x * dsize
                     base_args = {'msplit': ms, 'bsz': bsz, 'blockx': x}
                     yield from emit('opt/bstream-msplit-preload-c', base_args,
@@ -227,31 +235,34 @@ class HIPMatMul(MatMul):
         for _ in P_LDS:
             for ms in P_MS_LDS:
                 for bsz in P_BSZ_LDS:
-                    for x in P_BLKX:
+                    for x in P_BLKX_MS:
                         base_args = {'msplit': ms, 'bsz': bsz, 'blockx': x}
                         db = 2 * bsz * x * dsize
                         sb = bsz * x * dsize
                         # scalar core
                         yield from emit('core/bstream-msplit-lds', base_args,
                                         {'block': (x, ms, 1), 'shared': db, 'desc': f'bstream-msplit-lds/m{ms}-b{bsz}-x{x}'})
-                        yield from emit('core/bstream-msplit-lds-sb', base_args,
-                                        {'block': (x, ms, 1), 'shared': sb, 'desc': f'bstream-msplit-lds-sb/m{ms}-b{bsz}-x{x}'})
+                        # -sb single-buffer variant disabled for now (mako kept in repo, unverified on HW):
+                        # yield from emit('core/bstream-msplit-lds-sb', base_args,
+                        #                 {'block': (x, ms, 1), 'shared': sb, 'desc': f'bstream-msplit-lds-sb/m{ms}-b{bsz}-x{x}'})
                         # scalar preload-c
                         yield from emit('opt/bstream-msplit-preload-c-lds', base_args,
                                         {'block': (x, ms, 1), 'shared': db, 'desc': f'bstream-msplit-preload-c-lds/m{ms}-b{bsz}-x{x}'})
-                        yield from emit('opt/bstream-msplit-preload-c-lds-sb', base_args,
-                                        {'block': (x, ms, 1), 'shared': sb, 'desc': f'bstream-msplit-preload-c-lds-sb/m{ms}-b{bsz}-x{x}'})
+                        # -sb single-buffer variant disabled for now (mako kept in repo, unverified on HW):
+                        # yield from emit('opt/bstream-msplit-preload-c-lds-sb', base_args,
+                        #                 {'block': (x, ms, 1), 'shared': sb, 'desc': f'bstream-msplit-preload-c-lds-sb/m{ms}-b{bsz}-x{x}'})
                         # width preload-c (+ single-buffer)
                         for w in P_W:
                             w_args = {**base_args, 'dtype': f'{dtype}{w}', 'width': w}
                             yield from emit('opt/bstream-msplit-width-preload-c-lds', w_args,
                                             {'block': (x, ms, 1), 'width': w, 'shared': db * w, 'desc': f'bstream-msplit-width-preload-c-lds/w{w}-m{ms}-b{bsz}-x{x}'})
-                            yield from emit('opt/bstream-msplit-width-preload-c-lds-sb', w_args,
-                                            {'block': (x, ms, 1), 'width': w, 'shared': sb * w, 'desc': f'bstream-msplit-width-preload-c-lds-sb/w{w}-m{ms}-b{bsz}-x{x}'})
+                            # -sb single-buffer variant disabled for now (mako kept in repo, unverified on HW):
+                            # yield from emit('opt/bstream-msplit-width-preload-c-lds-sb', w_args,
+                            #                 {'block': (x, ms, 1), 'width': w, 'shared': sb * w, 'desc': f'bstream-msplit-width-preload-c-lds-sb/w{w}-m{ms}-b{bsz}-x{x}'})
                             # naked width + lds (no preload-c, double-buffer only)
                             yield from emit('opt/bstream-msplit-width-lds', w_args,
                                             {'block': (x, ms, 1), 'width': w, 'shared': db * w, 'desc': f'bstream-msplit-width-lds/w{w}-m{ms}-b{bsz}-x{x}'})
-
+        '''
         # --- 5. Special Templates ---
         if self._has_grouped_bstream_pattern():
             colset_groups = self._colset_groups()
@@ -291,7 +302,7 @@ class HIPMatMul(MatMul):
                                         gw_args,
                                         {'block': (x, ms, 1), 'width': w,
                                          'desc': f'grouped-bstream-msplit-width-preload-c/w{w}-m{ms}-x{x}'})
-
+        '''
         # cu-coop: dense-A variant. Stage A's non-zeros in LDS (shared by the
         # whole work-group), stream B via Infinity Cache, write C non-temporally.
         # CDNA gfx940+ and dense A only (see _cucoop_ok).
