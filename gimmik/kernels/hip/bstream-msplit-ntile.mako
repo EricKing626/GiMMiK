@@ -4,10 +4,12 @@
   Each thread owns ${ntile} independent B columns (spaced blockDim.x apart so
   each tile stays coalesced) and issues their loads together -> more outstanding
   HBM requests in flight, which helps saturate bandwidth on memory-bound
-  operators. LDS (bsub) and registers (bv/csub) scale x ntile; the dispatcher's
-  emit() filters any (bsz, blockx, ntile) whose LDS exceeds the budget. The tile
-  loop is a C for-loop (compiler unrolls small ntile) to avoid clobbering mako's
-  loop.index. UNVERIFIED on hardware -- validate accuracy + tune on MI300X.
+  operators. The tile dimension is UNROLLED in mako so every bv[t]/csub[t][j]
+  uses compile-time-constant indices (-> registers, not a runtime-indexed local
+  array which can trip the AMDGPU register coalescer). `pos` captures the chunk
+  index so the unroll does not clobber mako's loop.index. LDS (bsub) and
+  registers scale x ntile; emit() filters combos exceeding the LDS budget.
+  UNVERIFIED on hardware -- validate accuracy + tune on MI300X.
 </%doc>
 
 <%
@@ -40,9 +42,11 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     {
   % for kx in bchunks[0]:
     % if loop.index % msplit == cid:
-        for (int t = 0; t < ${ntile}; ++t)
-            if (col0 + t*blockDim.x < n)
-                bsub[0][${loop.index}][t*blockDim.x + threadIdx.x] = b[col0 + t*blockDim.x + ${kx}*ldb];
+<% pos = loop.index %>
+      % for t in range(ntile):
+        if (col0 + ${t}*blockDim.x < n)
+            bsub[0][${pos}][${t}*blockDim.x + threadIdx.x] = b[col0 + ${t}*blockDim.x + ${kx}*ldb];
+      % endfor
     % endif
   % endfor
     }
@@ -58,28 +62,45 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     % if not loop.parent.last:
       % for kx in bchunks[bb + 1]:
         % if loop.index % msplit == cid:
-        for (int t = 0; t < ${ntile}; ++t)
-            if (col0 + t*blockDim.x < n)
-                bsub[${(bb + 1) % 2}][${loop.index}][t*blockDim.x + threadIdx.x] = b[col0 + t*blockDim.x + ${kx}*ldb];
+<% pos = loop.index %>
+          % for t in range(ntile):
+        if (col0 + ${t}*blockDim.x < n)
+            bsub[${(bb + 1) % 2}][${pos}][${t}*blockDim.x + threadIdx.x] = b[col0 + ${t}*blockDim.x + ${kx}*ldb];
+          % endfor
         % endif
       % endfor
     % endif
     ## Load all ntile B values, then accumulate
     % for kx in bchunks[bb]:
-        for (int t = 0; t < ${ntile}; ++t)
-            bv[t] = bsub[${bb % 2}][${loop.index}][t*blockDim.x + threadIdx.x];
+<% pos = loop.index %>
+      % for t in range(ntile):
+        bv[${t}] = bsub[${bb % 2}][${pos}][${t}*blockDim.x + threadIdx.x];
+      % endfor
       % for j, jx in enumerate(A[mcx, kx]):
         % if jx != 0 and kx == afix[mcx[j]]:
-        for (int t = 0; t < ${ntile}; ++t) csub[t][${j}] = ${jx}*bv[t];
+          % for t in range(ntile):
+        csub[${t}][${j}] = ${jx}*bv[${t}];
+          % endfor
         % elif jx != 0:
-        for (int t = 0; t < ${ntile}; ++t) csub[t][${j}] += ${jx}*bv[t];
+          % for t in range(ntile):
+        csub[${t}][${j}] += ${jx}*bv[${t}];
+          % endfor
         % endif
         % if kx == alix[mcx[j]] and beta == 0:
-        for (int t = 0; t < ${ntile}; ++t) if (col0 + t*blockDim.x < n) nt_store_c(&c[col0 + t*blockDim.x + ${mcx[j]}*ldc], csub[t][${j}]);
+          % for t in range(ntile):
+        if (col0 + ${t}*blockDim.x < n)
+            nt_store_c(&c[col0 + ${t}*blockDim.x + ${mcx[j]}*ldc], csub[${t}][${j}]);
+          % endfor
         % elif kx == alix[mcx[j]] and beta == 1:
-        for (int t = 0; t < ${ntile}; ++t) if (col0 + t*blockDim.x < n) nt_store_c(&c[col0 + t*blockDim.x + ${mcx[j]}*ldc], nt_load_c(&c[col0 + t*blockDim.x + ${mcx[j]}*ldc]) + csub[t][${j}]);
+          % for t in range(ntile):
+        if (col0 + ${t}*blockDim.x < n)
+            nt_store_c(&c[col0 + ${t}*blockDim.x + ${mcx[j]}*ldc], nt_load_c(&c[col0 + ${t}*blockDim.x + ${mcx[j]}*ldc]) + csub[${t}][${j}]);
+          % endfor
         % elif kx == alix[mcx[j]]:
-        for (int t = 0; t < ${ntile}; ++t) if (col0 + t*blockDim.x < n) nt_store_c(&c[col0 + t*blockDim.x + ${mcx[j]}*ldc], csub[t][${j}] + ${beta}*nt_load_c(&c[col0 + t*blockDim.x + ${mcx[j]}*ldc]));
+          % for t in range(ntile):
+        if (col0 + ${t}*blockDim.x < n)
+            nt_store_c(&c[col0 + ${t}*blockDim.x + ${mcx[j]}*ldc], csub[${t}][${j}] + ${beta}*nt_load_c(&c[col0 + ${t}*blockDim.x + ${mcx[j]}*ldc]));
+          % endfor
         % endif
       % endfor
     % endfor
@@ -87,9 +108,15 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     % if loop.parent.last:
       % for j, jx in enumerate(afix):
         % if jx == -1 and j % msplit == cid and beta == 0:
-        for (int t = 0; t < ${ntile}; ++t) if (col0 + t*blockDim.x < n) nt_store_c(&c[col0 + t*blockDim.x + ${j}*ldc], make_zero());
+          % for t in range(ntile):
+        if (col0 + ${t}*blockDim.x < n)
+            nt_store_c(&c[col0 + ${t}*blockDim.x + ${j}*ldc], make_zero());
+          % endfor
         % elif jx == -1 and j % msplit == cid and beta != 1:
-        for (int t = 0; t < ${ntile}; ++t) if (col0 + t*blockDim.x < n) nt_store_c(&c[col0 + t*blockDim.x + ${j}*ldc], nt_load_c(&c[col0 + t*blockDim.x + ${j}*ldc])*${beta});
+          % for t in range(ntile):
+        if (col0 + ${t}*blockDim.x < n)
+            nt_store_c(&c[col0 + ${t}*blockDim.x + ${j}*ldc], nt_load_c(&c[col0 + ${t}*blockDim.x + ${j}*ldc])*${beta});
+          % endfor
         % endif
       % endfor
     % endif
