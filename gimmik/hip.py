@@ -195,23 +195,15 @@ class HIPMatMul(MatMul):
         # never competes on the sparse, bandwidth-bound shapes.
         if self._is_cdna3(gcn_arch) and self._mfma_dense_ok(dsize):
             mblkx = 64                       # one wavefront = 64 lanes
-            # An MFMA wavefront computes a 16-wide C column tile (the f64
-            # 16x16x4 N-tile), NOT one column per thread. So the launch grid
-            # must be sized by columns-per-block (NT * waves_per_block), not
-            # block.x. Pass it via 'griddiv' so grid.x = ceil(n / 16); using
-            # block.x (=64) would launch 4x too few blocks and compute only
-            # n/4 of C (inflating any bytes/time bandwidth estimate ~4x).
-            ncols = 16*(mblkx // warp_size)
+            # The mfma-dense kernel makes each block of blockx threads cover
+            # exactly blockx columns of C (each 64-lane wavefront sweeps 4
+            # consecutive 16-col MFMA tiles), so the standard grid convention
+            # grid.x = ceil(n / blockx) applies -- no special divisor needed.
             yield from emit('mfma-dense', {'blockx': mblkx},
                             {'block': (mblkx, 1, 1), 'width': 1,
-                             'griddiv': ncols,
                              'desc': f'mfma-dense/x{mblkx}'})
 
     def _process_meta(self, meta):
         if self.n is not None:
-            # Most kernels map one thread to one column of C, so the column
-            # stride per block is block.x*width. Kernels that cover a fixed
-            # column tile per block instead (e.g. mfma-dense, 16 cols per
-            # wavefront) override this via the 'griddiv' meta key.
-            div = meta.get('griddiv', meta['block'][0]*meta.get('width', 1))
+            div = meta['block'][0]*meta.get('width', 1)
             meta['grid'] = (-(-self.n // div), 1, 1)
