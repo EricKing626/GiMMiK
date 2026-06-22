@@ -1,10 +1,15 @@
 <%inherit file='base'/>
+<%doc>
+  bstream-msplit-lds: B double-buffer fill via global->LDS direct
+  (__builtin_amdgcn_load_to_lds, dword-split for gfx942), bypassing the
+  VGPR round-trip. CDNA (gfx94x) only; relies on __syncthreads() as the
+  async-DMA completion barrier (validate on hardware).
+</%doc>
 
 <%
 mx = partition(A, into=msplit, by='rows')
 bchunks = chunk(bix, bsz)
-ntload = context.get('ntload', False)
-bload = (lambda kx: f'nt_load_b(&b[i + {kx}*ldb])') if ntload else (lambda kx: f'b[i + {kx}*ldb]')
+ndw = {'double': 2, 'double2': 4, 'double4': 8, 'float': 1, 'float2': 2, 'float4': 4}.get(dtype, max(1, len(dtype)))
 %>
 
 __global__ __launch_bounds__(${blockx*msplit}) void
@@ -36,20 +41,8 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     {
   % for kx in bchunks[0]:
     % if loop.index % msplit == cid:
-        bsub[0][${loop.index}][threadIdx.x] = ${bload(kx)};
-    % endif
-  % endfor
-
-  ## Preload C values for active rows owned by this m-split lane
-  % for j, jx in enumerate(mx[cid]):
-    % if afix[jx] != -1:
-      % if beta == 0:
-        csub[${j}] = make_zero();
-      % elif beta == 1:
-        csub[${j}] = nt_load_c(&c[i + ${jx}*ldc]);
-      % else:
-        csub[${j}] = ${beta}*nt_load_c(&c[i + ${jx}*ldc]);
-      % endif
+        for (int dw = 0; dw < ${ndw}; ++dw)
+            __builtin_amdgcn_load_to_lds((void*)((const char*)(b + i + ${kx}*ldb) + 4*dw), (void*)((char*)&bsub[0][${loop.index}][threadIdx.x] + 4*dw), 4, 0, 0);
     % endif
   % endfor
     }
@@ -66,7 +59,8 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     % if not loop.parent.last:
       % for kx in bchunks[bb + 1]:
         % if loop.index % msplit == cid:
-        bsub[${(bb + 1) % 2}][${loop.index}][threadIdx.x] = ${bload(kx)};
+        for (int dw = 0; dw < ${ndw}; ++dw)
+            __builtin_amdgcn_load_to_lds((void*)((const char*)(b + i + ${kx}*ldb) + 4*dw), (void*)((char*)&bsub[${(bb + 1) % 2}][${loop.index}][threadIdx.x] + 4*dw), 4, 0, 0);
         % endif
       % endfor
     % endif
@@ -74,12 +68,18 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
     % for kx in bchunks[bb]:
         bv = bsub[${bb % 2}][${loop.index}][threadIdx.x];
       % for j, jx in enumerate(A[mcx, kx]):
-        % if jx != 0:
+        % if jx != 0 and kx == afix[mcx[j]]:
+        csub[${j}] = ${jx}*bv;
+        % elif jx != 0:
         csub[${j}] += ${jx}*bv;
         % endif
         ## If we're done with this dot product then store to global
-        % if kx == alix[mcx[j]]:
+        % if kx == alix[mcx[j]] and beta == 0:
         nt_store_c(&c[i + ${mcx[j]}*ldc], csub[${j}]);
+        % elif kx == alix[mcx[j]] and beta == 1:
+        nt_store_c(&c[i + ${mcx[j]}*ldc], nt_load_c(&c[i + ${mcx[j]}*ldc]) + csub[${j}]);
+        % elif kx == alix[mcx[j]]:
+        nt_store_c(&c[i + ${mcx[j]}*ldc], csub[${j}] + ${beta}*nt_load_c(&c[i + ${mcx[j]}*ldc]));
         % endif
       % endfor
     % endfor
@@ -89,7 +89,7 @@ ${kname}(const ${dtype}* __restrict__ b, ${dtype}* __restrict__ c)
         % if jx == -1 and j % msplit == cid and beta == 0:
         nt_store_c(&c[i + ${j}*ldc], make_zero());
         % elif jx == -1 and j % msplit == cid and beta != 1:
-        nt_store_c(&c[i + ${j}*ldc], ${beta}*nt_load_c(&c[i + ${j}*ldc]));
+        nt_store_c(&c[i + ${j}*ldc], nt_load_c(&c[i + ${j}*ldc])*${beta});
         % endif
       % endfor
     % endif

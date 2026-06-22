@@ -115,6 +115,39 @@ class HIPMatMul(MatMul):
                 }
                 yield from emit('bstream-msplit-width-preload-c', args, meta)
 
+        # --- bandwidth optimisations (CDNA only) ---------------------
+        # 1. B double-buffer fill via global->LDS direct (load_to_lds), no VGPR
+        # 2. non-temporal B loads (ntload=True): B is read-once, skip L2 alloc
+        for ms in msplits:
+            shared = 2*bsz*blkx*dsize
+            ldsargs = {'msplit': ms, 'bsz': bsz, 'blockx': blkx}
+            meta = {'block': (blkx, ms, 1), 'shared': shared,
+                    'desc': f'bstream-msplit-lds/m{ms}-b{bsz}-x{blkx}'}
+            yield from emit('bstream-msplit-lds', ldsargs, meta)
+            meta = {'block': (blkx, ms, 1), 'shared': shared,
+                    'desc': f'bstream-msplit-preload-c-lds/m{ms}-b{bsz}-x{blkx}'}
+            yield from emit('bstream-msplit-preload-c-lds', ldsargs, meta)
+
+            ntbargs = {'msplit': ms, 'bsz': bsz, 'blockx': blkx, 'ntload': True}
+            meta = {'block': (blkx, ms, 1), 'shared': shared,
+                    'desc': f'bstream-msplit-ntb/m{ms}-b{bsz}-x{blkx}'}
+            yield from emit('bstream-msplit', ntbargs, meta)
+            meta = {'block': (blkx, ms, 1), 'shared': shared,
+                    'desc': f'bstream-msplit-preload-c-ntb/m{ms}-b{bsz}-x{blkx}'}
+            yield from emit('bstream-msplit-preload-c', ntbargs, meta)
+
+        # 3. per-thread n-tiling for memory-level parallelism (ntile cols/thread);
+        #    smaller bsz keeps 2*bsz*blkx*ntile*dsize within the LDS budget.
+        nbsz = 4
+        for ms in msplits:
+            for ntile in (2,):
+                ntargs = {'msplit': ms, 'bsz': nbsz, 'blockx': blkx,
+                          'ntile': ntile}
+                shared = 2*nbsz*blkx*ntile*dsize
+                meta = {'block': (blkx, ms, 1), 'shared': shared, 'ntile': ntile,
+                        'desc': f'bstream-msplit-ntile/nt{ntile}-m{ms}-b{nbsz}-x{blkx}'}
+                yield from emit('bstream-msplit-ntile', ntargs, meta)
+
         for ks in ksplits:
             # k-split B loading, C preloading, C streaming kernel
             args = {'ksplit': ks, 'csz': csz, 'blockx': blkx}
@@ -140,5 +173,5 @@ class HIPMatMul(MatMul):
 
     def _process_meta(self, meta):
         if self.n is not None:
-            div = meta['block'][0]*meta['width']
+            div = meta['block'][0]*meta['width']*meta.get('ntile', 1)
             meta['grid'] = (-(-self.n // div), 1, 1)
