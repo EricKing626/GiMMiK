@@ -39,11 +39,10 @@ class HIPMatMul(MatMul):
         meta = {'block': (blkx, ks, 1), 'shared': (ks - 1)*csz*blkx*dsize}
         yield from emit('cstream-ksplit', args, meta)
 
-        # NOTE: architecture gate removed -- all tuned variants are emitted
-        # unconditionally (PyFR may not pass gcn_arch, which used to make the
-        # whole tuned section return early). The *-lds kernels use
-        # __builtin_amdgcn_load_to_lds, which is CDNA-only (gfx90a/gfx94x):
-        # fine on MI300X, but will fail to compile on non-CDNA GPUs.
+        # Only emit tuned variants on architectures they have been validated for.
+        base_arch = gcn_arch.split(':', 1)[0] if gcn_arch else None
+        if base_arch not in {'gfx90a', 'gfx942'} or warp_size != 64:
+            return
 
         # Tuned HIP variants
         msplits, ksplits = [4, 8], [2, 4]
