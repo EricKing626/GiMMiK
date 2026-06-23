@@ -1,11 +1,29 @@
 # -*- coding: utf-8 -*-
 
+import numpy as np
+
 from gimmik.base import MatMul
 
 
 class HIPMatMul(MatMul):
     platform = 'hip'
     basemeta = {'block': (128, 1, 1), 'width': 1, 'shared': 0}
+
+    def _is_cdna3(self, gcn_arch):
+        # MI300 series = gfx940/941/942 (real strings may carry feature
+        # suffixes, e.g. 'gfx942:sramecc+:xnack-'); match the gfxNNN token.
+        if gcn_arch is None:
+            return False
+        return str(gcn_arch).split(':', 1)[0] in ('gfx940', 'gfx941', 'gfx942')
+
+    def _mfma_dense_ok(self, dsize):
+        # mfma-dense is COMPUTE-bound: it densifies A and runs it through the
+        # f64 Matrix Core. Only worthwhile when A is dense enough that the
+        # vector-ALU path is FLOP-limited (high-order tet); for sparse A it
+        # loads zero-padding and loses to the bandwidth kernels.
+        nnz = int(np.count_nonzero(self.A))
+        density = nnz / (self.A.shape[0] * self.A.shape[1])
+        return density >= 0.5 and dsize == 8
 
     def _kernel_generators(self, dtype, dsize, *, gcn_arch=None, warp_size=64):
         max_block_threads = 1024
@@ -170,6 +188,19 @@ class HIPMatMul(MatMul):
                     )
                 }
                 yield from emit('cstream-ksplit-width-preload-c', args, meta)
+
+        # mfma-dense: f64 Matrix-Core dense kernel (CDNA3 / gfx94x only). NOT a
+        # bandwidth strategy -- it densifies A and uses v_mfma_f64 to win on
+        # COMPUTE throughput, the right tool only for dense, compute-bound
+        # operators (high-order tet). Gated by _mfma_dense_ok so it never
+        # competes on the sparse, bandwidth-bound shapes. Each 64-lane wavefront
+        # sweeps 4 consecutive 16-col MFMA tiles => blockx cols/block, so the
+        # standard grid.x = ceil(n / blockx) convention applies.
+        if self._is_cdna3(gcn_arch) and self._mfma_dense_ok(dsize):
+            mblkx = 64
+            yield from emit('mfma-dense', {'blockx': mblkx},
+                            {'block': (mblkx, 1, 1), 'width': 1,
+                             'desc': f'mfma-dense/x{mblkx}'})
 
     def _process_meta(self, meta):
         if self.n is not None:
